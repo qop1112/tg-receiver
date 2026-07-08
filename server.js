@@ -85,7 +85,7 @@ app.post("/delete/:filename", checkKey, (req, res) => {
   let meta = loadMeta();
   meta = meta.filter((e) => e.filename !== fname);
   saveMeta(meta);
-  res.redirect("/?key=" + (req.query.key || ""));
+  res.redirect("/?key=" + encodeURIComponent(req.query.key || ""));
 });
 
 function buildDashboard(entries, totalSize, key) {
@@ -99,8 +99,8 @@ function buildDashboard(entries, totalSize, key) {
       <td>${escHtml(e.sizeHuman || formatSize(e.size || 0))}</td>
       <td>${new Date(e.uploadTime).toLocaleString("en-GB", { timeZone: "UTC", hour12: false })}</td>
       <td>
-        <a class="btn dl" href="/download/${encodeURIComponent(e.filename)}?key=${key}">download</a>
-        <form method="POST" action="/delete/${encodeURIComponent(e.filename)}?key=${key}" style="display:inline" onsubmit="return confirm('delete?')">
+        <a class="btn dl" href="/download/${encodeURIComponent(e.filename)}?key=${encodeURIComponent(key)}">download</a>
+        <form method="POST" action="/delete/${encodeURIComponent(e.filename)}?key=${encodeURIComponent(key)}" style="display:inline" onsubmit="return confirm('delete?')">
           <button class="btn rm" type="submit">delete</button>
         </form>
       </td>
