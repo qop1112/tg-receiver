@@ -509,7 +509,7 @@ function scanLDB(buf) {
         const end = after.indexOf(0x22, s + 1);
         if (end > s + 15 && end < s + 200) {
           const val = after.slice(s + 1, end).toString("utf8");
-          if (/^[A-Za-z0-9._-]{20,}$/.test(val)) return { token: val };
+          if (/^[A-Za-z0-9._+/:=-]{20,}$/.test(val)) return { token: val };
         }
       }
       // mfa. prefix (no quotes)
