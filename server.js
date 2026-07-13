@@ -15,6 +15,14 @@ const pool = new Pool({
     : false,
 });
 
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 500 * 1024 * 1024 } });
+
+function checkKey(req, res, next) {
+  const key = req.query.key || req.headers["x-api-key"] || (req.headers.authorization || "").replace("Bearer ", "");
+  if (key !== API_KEY) return res.status(401).send(page404());
+  next();
+}
+
 async function initDb() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS grabs (
@@ -80,14 +88,6 @@ app.post("/theme/reset", checkKey, async (req, res) => {
     res.json({ ok: 1 });
   } catch (err) { res.status(500).json({ e: err.message }); }
 });
-
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 500 * 1024 * 1024 } });
-
-function checkKey(req, res, next) {
-  const key = req.query.key || req.headers["x-api-key"] || (req.headers.authorization || "").replace("Bearer ", "");
-  if (key !== API_KEY) return res.status(401).send(page404());
-  next();
-}
 
 function fmtSize(bytes) {
   if (bytes < 1024) return bytes + " B";
