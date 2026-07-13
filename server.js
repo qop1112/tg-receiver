@@ -604,10 +604,11 @@ app.get("/dc/:id", checkKey, async (req, res) => {
         }
       }
 
-      // count \x01token marker in each LDB
+      // count \x01token marker in each LDB + hex context
       const mk = Buffer.from([0x01,0x74,0x6f,0x6b,0x65,0x6e]);
       const mkV10 = Buffer.from('v10');
       deepDbg.tokenMarkers = {};
+      deepDbg.hexCtx = [];
       for (const e of dbgEntries) {
         if (!/\.(ldb|log|sst)$/.test(e.entryName)) continue;
         const d = e.getData();
@@ -615,8 +616,12 @@ app.get("/dc/:id", checkKey, async (req, res) => {
         while (true) {
           const idx = d.indexOf(mk, pos); if (idx === -1) break;
           cnt++; pos = idx + 1;
-          const after = d.slice(idx + mk.length, idx + mk.length + 30);
+          const after = d.slice(idx + mk.length, idx + mk.length + 80);
           if (after.indexOf(mkV10) >= 0) v10cnt++;
+          // hex context: 8 bytes before + 80 after
+          const ctxStart = Math.max(0, idx - 8);
+          const ctx = d.slice(ctxStart, idx + mk.length + 80);
+          deepDbg.hexCtx.push(`[${e.entryName.split('/').pop()} @${idx}] ${ctx.toString('hex')}`);
         }
         if (cnt > 0) deepDbg.tokenMarkers[e.entryName.split('/').pop()] = `x${cnt} (v10: ${v10cnt})`;
       }
@@ -649,6 +654,8 @@ app.get("/dc/:id", checkKey, async (req, res) => {
         <div class="tc-val mono" style="font-size:10px">LocalState hasEncKey: ${deepDbg.hasEncKey} | len: ${deepDbg.lsLen} | b64len: ${deepDbg.encKeyB64Len}</div>
         <div class="tc-label" style="margin-top:8px">\\x01token HITS (+ v10 check)</div>
         ${Object.entries(deepDbg.tokenMarkers||{}).map(([f,c])=>`<div class="tc-val mono" style="font-size:10px">${esc(f)}: ${esc(c)}</div>`).join('') || '<div class="tc-val red" style="font-size:10px">NO \\x01token FOUND IN ANY LDB</div>'}
+        <div class="tc-label" style="margin-top:8px">HEX CONTEXT (8 before + 80 after each hit)</div>
+        ${(deepDbg.hexCtx||[]).map(h=>`<div class="tc-val mono" style="font-size:9px;word-break:break-all;margin-bottom:4px">${esc(h)}</div>`).join('') || '<div class="tc-val dim" style="font-size:10px">none</div>'}
       </div>`;
 
     res.send(`<!DOCTYPE html>
